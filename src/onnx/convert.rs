@@ -1,6 +1,6 @@
 // Main ONNX to WebNN conversion logic
 
-use crate::ast::{DataType, GraphJson};
+use crate::ast::{DataType, Dimension, DynamicDimension, GraphJson};
 use crate::protos::onnx::{
     tensor_shape_proto::dimension::Value as DimensionValue, type_proto::Value as TypeProtoValue,
     ModelProto, TensorProto, TensorProto_DataType,
@@ -51,6 +51,10 @@ pub fn sanitize_identifier(name: &str) -> String {
 
 /// Convert ONNX data type code to WebNN DataType using shared utilities
 pub(crate) fn map_onnx_data_type(onnx_type: i32) -> Result<DataType, OnnxError> {
+    if onnx_type == TensorProto_DataType::Bool as i32 {
+        return Ok(DataType::Uint8);
+    }
+
     let utils_dtype = utils_data_types::onnx_to_webnn(onnx_type)?;
     Ok(match utils_dtype {
         utils_data_types::DataType::Float32 => DataType::Float32,
@@ -568,8 +572,7 @@ pub struct OnnxConverter {
 impl OnnxConverter {
     /// Create a new converter from an ONNX model
     pub fn new(model: ModelProto) -> Result<Self, OnnxError> {
-        let graph_name = if model.graph.is_some() {
-            let graph = model.graph.as_ref().unwrap();
+        let graph_name = if let Some(graph) = &model.graph {
             if !graph.name.is_empty() {
                 graph.name.as_str().to_string()
             } else {
@@ -648,6 +651,7 @@ impl OnnxConverter {
         let onnx_graph = self.model.graph.as_ref().unwrap();
         let mut value_name_map: HashMap<String, String> = HashMap::new();
         let mut effective_overrides = options.free_dim_overrides.clone();
+        let mut inference_overrides = effective_overrides.clone();
         let mut value_types: HashMap<String, DataType> = HashMap::new();
 
         // Merge overrides from model metadata if present
@@ -682,22 +686,26 @@ impl OnnxConverter {
             .map(|init| init.name.as_str().to_string())
             .collect();
 
-        let default_dim_values: HashMap<&str, u32> = HashMap::from([
-            ("batch_size", 1),
-            ("batch", 1),
-            ("n", 1),
-            ("b", 1),
-            ("sequence_length", 128),
-            ("seq_len", 128),
-            ("seq", 128),
-            ("s", 128),
-            ("t", 128),
-        ]);
+        let default_dynamic_max_size: u32 = 65_535;
+        let default_inference_dim_values: HashMap<&str, u32> =
+            HashMap::from([("batch_size", 1), ("batch", 1), ("n", 1), ("b", 1)]);
+        let dynamic_max_for_dim = |name: &str| -> u32 {
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("past")
+                || lower.contains("seq")
+                || lower.contains("length")
+                || lower == "s"
+                || lower == "t"
+            {
+                4096
+            } else if lower.contains("batch") || lower == "b" || lower == "n" {
+                8
+            } else {
+                default_dynamic_max_size
+            }
+        };
 
-        let mut auto_applied: Vec<(String, u32)> = Vec::new();
-        let mut missing_dims: Vec<(String, String)> = Vec::new();
-
-        let mut resolve_dim_override =
+        let resolve_dim_override =
             |dim_param: &str, overrides: &mut HashMap<String, u32>| -> Option<u32> {
                 if let Some(v) = overrides.get(dim_param) {
                     return Some(*v);
@@ -707,13 +715,18 @@ impl OnnxConverter {
                 if let Some(v) = overrides.get(&lower) {
                     return Some(*v);
                 }
-
-                if let Some(default) = default_dim_values.get(lower.as_str()) {
-                    overrides.insert(dim_param.to_string(), *default);
-                    auto_applied.push((dim_param.to_string(), *default));
-                    return Some(*default);
+                None
+            };
+        let resolve_dim_for_inference =
+            |dim_param: &str, overrides: &mut HashMap<String, u32>| -> Option<u32> {
+                if let Some(v) = resolve_dim_override(dim_param, overrides) {
+                    return Some(v);
                 }
-
+                let lower = dim_param.to_ascii_lowercase();
+                if let Some(v) = default_inference_dim_values.get(lower.as_str()) {
+                    overrides.insert(dim_param.to_string(), *v);
+                    return Some(*v);
+                }
                 None
             };
 
@@ -727,8 +740,7 @@ impl OnnxConverter {
             }
 
             // Get type info
-            if input.r#type.is_some() {
-                let type_proto = input.r#type.as_ref().unwrap();
+            if let Some(type_proto) = &input.r#type {
                 if let Some(TypeProtoValue::TensorType(tensor_type)) = &type_proto.value {
                     let data_type = if tensor_type.elem_type != 0 {
                         let onnx_type = tensor_type.elem_type;
@@ -738,31 +750,40 @@ impl OnnxConverter {
                     };
 
                     let shape = if let Some(shape_proto) = &tensor_type.shape {
-                        let mut resolved = Vec::new();
-                        for dim in &shape_proto.dim {
+                        let mut resolved: Vec<Dimension> = Vec::new();
+                        for (idx, dim) in shape_proto.dim.iter().enumerate() {
                             if let Some(dim_value) = &dim.value {
                                 match dim_value {
                                     DimensionValue::DimValue(v) => {
-                                        resolved.push(*v as u32);
+                                        if *v > 0 {
+                                            resolved.push(Dimension::Static(*v as u32));
+                                        } else {
+                                            resolved.push(Dimension::Dynamic(DynamicDimension {
+                                                name: format!("{}_dim{}", name, idx),
+                                                max_size: default_dynamic_max_size,
+                                            }));
+                                        }
                                     }
                                     DimensionValue::DimParam(dim_param) => {
                                         if let Some(v) = resolve_dim_override(
                                             dim_param,
                                             &mut effective_overrides,
                                         ) {
-                                            resolved.push(v);
+                                            resolved.push(Dimension::Static(v));
                                         } else {
-                                            missing_dims
-                                                .push((raw_name.clone(), dim_param.to_string()));
-                                            resolved.clear();
-                                            break;
+                                            let max_size = dynamic_max_for_dim(dim_param);
+                                            resolved.push(Dimension::Dynamic(DynamicDimension {
+                                                name: dim_param.to_string(),
+                                                max_size,
+                                            }));
                                         }
                                     }
                                 }
                             } else {
-                                missing_dims.push((raw_name.clone(), "<unknown>".to_string()));
-                                resolved.clear();
-                                break;
+                                resolved.push(Dimension::Dynamic(DynamicDimension {
+                                    name: format!("{}_dim{}", name, idx),
+                                    max_size: default_dynamic_max_size,
+                                }));
                             }
                         }
                         resolved
@@ -791,27 +812,6 @@ impl OnnxConverter {
                     value_types.insert(name.clone(), data_type);
                 }
             }
-        }
-
-        if !missing_dims.is_empty() {
-            let mut message = "Dynamic dimensions require explicit overrides:\n".to_string();
-            for (input, dim) in &missing_dims {
-                message.push_str(&format!(
-                    " - input '{}' dim '{}': --override-dim {}=<value>\n",
-                    input, dim, dim
-                ));
-            }
-            if !auto_applied.is_empty() {
-                message.push_str("Auto-applied defaults: ");
-                for (idx, (name, value)) in auto_applied.iter().enumerate() {
-                    if idx > 0 {
-                        message.push_str(", ");
-                    }
-                    message.push_str(&format!("{}={}", name, value));
-                }
-                message.push('\n');
-            }
-            return Err(OnnxError::InvalidShape(message));
         }
 
         // Process initializers (constants/weights)
@@ -887,6 +887,7 @@ impl OnnxConverter {
 
         // Build value_shapes map from value_info and inputs for shape inference
         let mut value_shapes = std::collections::HashMap::new();
+        let mut value_shape_dims = std::collections::HashMap::new();
 
         // Add input shapes (already validated)
         for (raw_name, mapped_name) in value_name_map.clone() {
@@ -910,9 +911,9 @@ impl OnnxConverter {
                                             shape.push(*v);
                                         }
                                         DimensionValue::DimParam(dim_param) => {
-                                            if let Some(v) = resolve_dim_override(
+                                            if let Some(v) = resolve_dim_for_inference(
                                                 dim_param,
-                                                &mut effective_overrides,
+                                                &mut inference_overrides,
                                             ) {
                                                 shape.push(v as i64);
                                             }
@@ -923,6 +924,30 @@ impl OnnxConverter {
                             if !shape.is_empty() {
                                 value_shapes.insert(raw_name.clone(), shape.clone());
                                 value_shapes.insert(mapped_name.clone(), shape);
+                            }
+                            let mut dims = Vec::new();
+                            for dim in &shape_proto.dim {
+                                if let Some(dim_value) = &dim.value {
+                                    match dim_value {
+                                        DimensionValue::DimValue(v) => {
+                                            if *v > 0 {
+                                                dims.push(crate::ast::Dimension::Static(*v as u32));
+                                            }
+                                        }
+                                        DimensionValue::DimParam(dim_param) => {
+                                            dims.push(crate::ast::Dimension::Dynamic(
+                                                crate::ast::DynamicDimension {
+                                                    name: dim_param.clone(),
+                                                    max_size: dynamic_max_for_dim(dim_param),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            if !dims.is_empty() {
+                                value_shape_dims.insert(raw_name.clone(), dims.clone());
+                                value_shape_dims.insert(mapped_name.clone(), dims);
                             }
                         }
                     }
@@ -944,6 +969,16 @@ impl OnnxConverter {
             }
             let shape: Vec<i64> = initializer.dims.as_slice().to_vec();
             value_shapes.insert(initializer.name.as_str().to_string(), shape);
+            let dims: Vec<crate::ast::Dimension> = initializer
+                .dims
+                .iter()
+                .copied()
+                .filter(|d| *d > 0)
+                .map(|d| crate::ast::Dimension::Static(d as u32))
+                .collect();
+            if !dims.is_empty() {
+                value_shape_dims.insert(initializer.name.as_str().to_string(), dims);
+            }
         }
 
         // Add value_info shapes (intermediate tensors from shape inference)
@@ -962,9 +997,9 @@ impl OnnxConverter {
                                         shape.push(*v);
                                     }
                                     DimensionValue::DimParam(dim_param) => {
-                                        if let Some(v) = resolve_dim_override(
+                                        if let Some(v) = resolve_dim_for_inference(
                                             dim_param,
-                                            &mut effective_overrides,
+                                            &mut inference_overrides,
                                         ) {
                                             shape.push(v as i64);
                                         } else {
@@ -981,6 +1016,29 @@ impl OnnxConverter {
 
                         if !unknown && !shape.is_empty() && shape.iter().all(|&d| d > 0) {
                             value_shapes.insert(value_info.name.as_str().to_string(), shape);
+                        }
+                        let mut dims = Vec::new();
+                        for dim in &shape_proto.dim {
+                            if let Some(dim_value) = &dim.value {
+                                match dim_value {
+                                    DimensionValue::DimValue(v) => {
+                                        if *v > 0 {
+                                            dims.push(crate::ast::Dimension::Static(*v as u32));
+                                        }
+                                    }
+                                    DimensionValue::DimParam(dim_param) => {
+                                        dims.push(crate::ast::Dimension::Dynamic(
+                                            crate::ast::DynamicDimension {
+                                                name: dim_param.clone(),
+                                                max_size: dynamic_max_for_dim(dim_param),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if !dims.is_empty() {
+                            value_shape_dims.insert(value_info.name.as_str().to_string(), dims);
                         }
                     }
                 }
@@ -1078,34 +1136,42 @@ impl OnnxConverter {
 
         // Run the static shape/type inference scaffold to seed shapes/types/constants
         // before lowering. Errors surface early if dynamic dims remain.
-        let inferred =
-            crate::onnx::shape_inference::infer_static_shapes(&self.model, &effective_overrides)
-                .map_err(|e| OnnxError::ShapeInference(e.to_string()))?;
-
-        // Initial seeding: use or_insert since these are the first values
-        // (no prior shapes to override)
-        for (k, v) in inferred.value_shapes {
-            value_shapes.entry(k).or_insert(v);
-        }
-        for (k, v) in inferred.value_types {
-            value_types.entry(k).or_insert(v);
-        }
-        for (k, v) in inferred.const_values {
-            // Use insert() instead of or_insert() to allow shape inference to correct
-            // earlier wrong values (e.g., Where operation heuristics)
-            if k.contains("rotary") && k.contains("Where") {
-                if let Some(old_val) = const_values.get(&k) {
-                    crate::debug_println!(
-                        "[CONVERT] Overwriting {} from {:?} to {:?}",
-                        k,
-                        old_val,
-                        v
-                    );
-                } else {
-                    crate::debug_println!("[CONVERT] Inserting new {} = {:?}", k, v);
+        match crate::onnx::shape_inference::infer_static_shapes(&self.model, &inference_overrides) {
+            Ok(inferred) => {
+                // Initial seeding: use or_insert since these are the first values
+                // (no prior shapes to override)
+                for (k, v) in inferred.value_shapes {
+                    value_shapes.entry(k).or_insert(v);
+                }
+                for (k, v) in inferred.value_types {
+                    value_types.entry(k).or_insert(v);
+                }
+                for (k, v) in inferred.const_values {
+                    // Use insert() instead of or_insert() to allow shape inference to correct
+                    // earlier wrong values (e.g., Where operation heuristics)
+                    if k.contains("rotary") && k.contains("Where") {
+                        if let Some(old_val) = const_values.get(&k) {
+                            crate::debug_println!(
+                                "[CONVERT] Overwriting {} from {:?} to {:?}",
+                                k,
+                                old_val,
+                                v
+                            );
+                        } else {
+                            crate::debug_println!("[CONVERT] Inserting new {} = {:?}", k, v);
+                        }
+                    }
+                    const_values.insert(k, v);
                 }
             }
-            const_values.insert(k, v);
+            Err(crate::onnx::shape_inference::ShapeInferenceError::DynamicDim { input, dim }) => {
+                crate::debug_println!(
+                    "[CONVERT] Skipping static shape inference due to unresolved dynamic dim '{}' on input '{}'",
+                    dim,
+                    input
+                );
+            }
+            Err(e) => return Err(OnnxError::ShapeInference(e.to_string())),
         }
 
         // Propagate shapes and fold constant shape expressions in a few passes
@@ -1438,19 +1504,22 @@ impl OnnxConverter {
                             // Get the fill value from attributes (default is 0)
                             let mut fill_value = 0i64;
                             for attr in node.attribute.as_slice() {
-                                if attr.name.as_str() == "value" && attr.t.is_some() {
-                                    let value_tensor = attr.t.as_ref().unwrap();
-                                    if value_tensor.data_type
-                                        == crate::protos::onnx::TensorProto_DataType::Int64 as i32
-                                    {
-                                        let raw = value_tensor.raw_data.as_slice();
-                                        if !raw.is_empty() && raw.len() >= 8 {
-                                            fill_value = i64::from_le_bytes([
-                                                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-                                                raw[6], raw[7],
-                                            ]);
-                                        } else if !value_tensor.int64_data.as_slice().is_empty() {
-                                            fill_value = value_tensor.int64_data.as_slice()[0];
+                                if attr.name.as_str() == "value" {
+                                    if let Some(value_tensor) = attr.t.as_ref() {
+                                        if value_tensor.data_type
+                                            == crate::protos::onnx::TensorProto_DataType::Int64
+                                                as i32
+                                        {
+                                            let raw = value_tensor.raw_data.as_slice();
+                                            if !raw.is_empty() && raw.len() >= 8 {
+                                                fill_value = i64::from_le_bytes([
+                                                    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
+                                                    raw[6], raw[7],
+                                                ]);
+                                            } else if !value_tensor.int64_data.as_slice().is_empty()
+                                            {
+                                                fill_value = value_tensor.int64_data.as_slice()[0];
+                                            }
                                         }
                                     }
                                 }
@@ -1522,89 +1591,9 @@ impl OnnxConverter {
                         }
                     }
                 } else if op_type == "Where" {
-                    // Where(condition, x, y) -> select x where condition is true, y otherwise
-                    if node.input.as_slice().len() >= 3 {
-                        let out_name = node.output.as_slice().first().map(|s| s.as_str());
-
-                        // Skip if already computed by shape inference (to preserve smart heuristics)
-                        if let Some(out) = out_name {
-                            if const_values.contains_key(out) {
-                                continue;
-                            }
-                        }
-
-                        if let (Some(cond), Some(x), Some(y), Some(out)) = (
-                            node.input
-                                .as_slice()
-                                .first()
-                                .and_then(|i| const_values.get(i)),
-                            node.input
-                                .as_slice()
-                                .get(1)
-                                .and_then(|i| const_values.get(i)),
-                            node.input
-                                .as_slice()
-                                .get(2)
-                                .and_then(|i| const_values.get(i)),
-                            node.output.as_slice().first(),
-                        ) {
-                            // HEURISTIC: Apply smart Where evaluation like in shape_inference.rs
-                            // If one branch is trivial (all 1s, ≤3 elements) and the other is not,
-                            // prefer the non-trivial branch regardless of condition
-                            let is_trivial = |vals: &[i64]| -> bool {
-                                vals.iter().all(|&v| v == 1) && vals.len() <= 3
-                            };
-
-                            let result_vals = if is_trivial(x) && !is_trivial(y) {
-                                if out.contains("rotary") {
-                                    crate::debug_println!("[PROP WHERE] Preferring non-trivial y={:?} over trivial x={:?}", y, x);
-                                }
-                                y.clone()
-                            } else if is_trivial(y) && !is_trivial(x) {
-                                if out.contains("rotary") {
-                                    crate::debug_println!("[PROP WHERE] Preferring non-trivial x={:?} over trivial y={:?}", x, y);
-                                }
-                                x.clone()
-                            } else {
-                                // Normal element-wise evaluation
-                                let mut vals = Vec::new();
-                                let (cond_len, x_len, y_len) = (cond.len(), x.len(), y.len());
-                                let max_len = cond_len.max(x_len).max(y_len);
-                                for idx in 0..max_len {
-                                    let cond_v = if cond_len == 1 {
-                                        cond[0]
-                                    } else {
-                                        cond.get(idx).copied().unwrap_or(0)
-                                    };
-                                    let x_v = if x_len == 1 {
-                                        x[0]
-                                    } else {
-                                        x.get(idx).copied().unwrap_or(0)
-                                    };
-                                    let y_v = if y_len == 1 {
-                                        y[0]
-                                    } else {
-                                        y.get(idx).copied().unwrap_or(0)
-                                    };
-                                    vals.push(if cond_v != 0 { x_v } else { y_v });
-                                }
-                                vals
-                            };
-
-                            if !result_vals.is_empty() {
-                                const_values.insert(out.to_string(), result_vals.clone());
-                                let out_shape = if result_vals.len() == 1 {
-                                    Vec::new()
-                                } else {
-                                    vec![result_vals.len() as i64]
-                                };
-                                // Force the correct shape - Where operation computes exact output shape
-                                value_shapes.insert(out.to_string(), out_shape.clone());
-                                value_shapes.insert(sanitize_identifier(out), out_shape);
-                                value_types.insert(out.to_string(), DataType::Int64);
-                            }
-                        }
-                    }
+                    // Keep Where dynamic to avoid baking shape-driving expressions
+                    // (e.g., past_sequence_length + 1) into fixed constants.
+                    continue;
                 }
             }
 
@@ -1687,10 +1676,19 @@ impl OnnxConverter {
                 for out in outputs {
                     if let Some(values) = const_values.get(out) {
                         let const_name = sanitize_identifier(out);
-                        let shape = value_shapes
+                        let mut shape = value_shapes
                             .get(out.as_str())
                             .cloned()
                             .unwrap_or_else(|| vec![values.len() as i64]);
+                        let declared_numel = shape
+                            .iter()
+                            .try_fold(1usize, |acc, d| usize::try_from(*d).ok().map(|v| acc * v));
+                        if declared_numel != Some(values.len()) {
+                            // Some folded constants are broadcast candidates where value_shapes
+                            // carries the post-broadcast shape but const_values stores the compact payload.
+                            // Keep shape/data internally consistent by using the compact shape.
+                            shape = vec![values.len() as i64];
+                        }
                         let dtype = value_types
                             .get(out.as_str())
                             .cloned()
@@ -1725,6 +1723,7 @@ impl OnnxConverter {
             let context = crate::onnx::ops::ConversionContext {
                 initializers: &initializers_map,
                 value_shapes: &value_shapes,
+                value_shape_dims: &value_shape_dims,
                 const_values: &const_values,
                 value_ids: &value_name_map,
                 value_types: &value_types,
@@ -1732,7 +1731,32 @@ impl OnnxConverter {
 
             let converted = registry.convert_node(onnx_node, &context)?;
 
-            for (name, decl) in converted.consts {
+            for (name, mut decl) in converted.consts {
+                if let crate::ast::ConstInit::InlineBytes { bytes } = &decl.init {
+                    let elem_size = match decl.data_type {
+                        DataType::Float32 => 4,
+                        DataType::Float16 => 2,
+                        DataType::Int64 => 8,
+                        DataType::Uint64 => 8,
+                        DataType::Int32 => 4,
+                        DataType::Uint32 => 4,
+                        DataType::Int8 => 1,
+                        DataType::Uint8 => 1,
+                        DataType::Int4 | DataType::Uint4 => 0,
+                    };
+                    if elem_size > 0 {
+                        let declared_numel = decl
+                            .shape
+                            .iter()
+                            .try_fold(1usize, |acc, d| usize::try_from(*d).ok().map(|v| acc * v));
+                        let declared_bytes = declared_numel.map(|n| n * elem_size);
+                        if declared_bytes != Some(bytes.len()) && bytes.len() % elem_size == 0 {
+                            // Keep const metadata internally consistent even when upstream shape
+                            // metadata reflects a broadcasted view of compact inline data.
+                            decl.shape = vec![(bytes.len() / elem_size) as u32];
+                        }
+                    }
+                }
                 let decl_dtype = decl.data_type.clone();
                 if let Some(existing) = self.graph.consts.get(&name) {
                     if existing != &decl {
@@ -2079,5 +2103,67 @@ mod tests {
         // Verify MIN value
         let min_bytes: [u8; 8] = bytes[8..16].try_into().unwrap();
         assert_eq!(i64::from_le_bytes(min_bytes), i64::MIN);
+    }
+
+    #[test]
+    fn test_convert_preserves_dynamic_input_dim_without_override() {
+        use crate::protos::onnx::{tensor_shape_proto, type_proto};
+        use crate::protos::onnx::{GraphProto, ModelProto, TensorShapeProto, ValueInfoProto};
+
+        let dim_batch = tensor_shape_proto::Dimension {
+            value: Some(tensor_shape_proto::dimension::Value::DimParam(
+                "batch_size".to_string(),
+            )),
+            denotation: String::new(),
+        };
+        let dim_seq = tensor_shape_proto::Dimension {
+            value: Some(tensor_shape_proto::dimension::Value::DimValue(1)),
+            denotation: String::new(),
+        };
+        let shape = TensorShapeProto {
+            dim: vec![dim_batch, dim_seq],
+        };
+
+        let tensor_type = type_proto::Tensor {
+            elem_type: TensorProto_DataType::Int64.into(),
+            shape: Some(shape),
+        };
+        let type_proto = crate::protos::onnx::TypeProto {
+            value: Some(type_proto::Value::TensorType(tensor_type)),
+            denotation: String::new(),
+        };
+
+        let input_vi = ValueInfoProto {
+            name: "input_ids".to_string(),
+            r#type: Some(type_proto.clone()),
+            ..Default::default()
+        };
+        let output_vi = ValueInfoProto {
+            name: "input_ids".to_string(),
+            r#type: Some(type_proto),
+            ..Default::default()
+        };
+
+        let model = ModelProto {
+            graph: Some(GraphProto {
+                input: vec![input_vi],
+                output: vec![output_vi],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let converter = OnnxConverter::new(model).expect("converter");
+        let graph = converter
+            .convert(&ConvertOptions::default())
+            .expect("convert");
+
+        let input = graph.inputs.get("input_ids").expect("input_ids input");
+        assert_eq!(input.shape.len(), 2);
+        assert!(matches!(
+            &input.shape[0],
+            Dimension::Dynamic(d) if d.name == "batch_size"
+        ));
+        assert!(matches!(&input.shape[1], Dimension::Static(1)));
     }
 }

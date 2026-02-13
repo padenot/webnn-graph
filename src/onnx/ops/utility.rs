@@ -316,39 +316,40 @@ impl UtilityHandler {
         let mut fill_value_i64: i64 = 0;
         let mut dtype = DataType::Int64;
         for attr in node.attribute.as_slice() {
-            if attr.name.as_str() == "value" && attr.t.is_some() {
-                let t = attr.t.as_ref().unwrap();
-                match t.data_type {
-                    // FLOAT
-                    x if x == crate::protos::onnx::TensorProto_DataType::Float as i32 => {
-                        dtype = DataType::Float32;
-                        if !t.float_data.as_slice().is_empty() {
-                            fill_value_i64 = t.float_data.as_slice()[0].to_bits() as i64;
-                        } else if !t.raw_data.as_slice().is_empty()
-                            && t.raw_data.as_slice().len() >= 4
-                        {
-                            let raw = &t.raw_data.as_slice()[..4];
-                            let bits = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                            fill_value_i64 = bits as i64;
-                        } else {
-                            fill_value_i64 = 0f32.to_bits() as i64;
+            if attr.name.as_str() == "value" {
+                if let Some(t) = attr.t.as_ref() {
+                    match t.data_type {
+                        // FLOAT
+                        x if x == crate::protos::onnx::TensorProto_DataType::Float as i32 => {
+                            dtype = DataType::Float32;
+                            if !t.float_data.as_slice().is_empty() {
+                                fill_value_i64 = t.float_data.as_slice()[0].to_bits() as i64;
+                            } else if !t.raw_data.as_slice().is_empty()
+                                && t.raw_data.as_slice().len() >= 4
+                            {
+                                let raw = &t.raw_data.as_slice()[..4];
+                                let bits = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                                fill_value_i64 = bits as i64;
+                            } else {
+                                fill_value_i64 = 0f32.to_bits() as i64;
+                            }
                         }
-                    }
-                    // INT64
-                    x if x == crate::protos::onnx::TensorProto_DataType::Int64 as i32 => {
-                        dtype = DataType::Int64;
-                        if !t.int64_data.as_slice().is_empty() {
-                            fill_value_i64 = t.int64_data.as_slice()[0];
-                        } else if !t.raw_data.as_slice().is_empty()
-                            && t.raw_data.as_slice().len() >= 8
-                        {
-                            let raw = &t.raw_data.as_slice()[..8];
-                            fill_value_i64 = i64::from_le_bytes([
-                                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                            ]);
+                        // INT64
+                        x if x == crate::protos::onnx::TensorProto_DataType::Int64 as i32 => {
+                            dtype = DataType::Int64;
+                            if !t.int64_data.as_slice().is_empty() {
+                                fill_value_i64 = t.int64_data.as_slice()[0];
+                            } else if !t.raw_data.as_slice().is_empty()
+                                && t.raw_data.as_slice().len() >= 8
+                            {
+                                let raw = &t.raw_data.as_slice()[..8];
+                                fill_value_i64 = i64::from_le_bytes([
+                                    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                                ]);
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -537,35 +538,53 @@ impl UtilityHandler {
             let mut ends = read_ints(ends_name, context);
 
             if starts.is_none() || ends.is_none() {
-                if let Some(shape) = context.value_shapes.get(inputs[0].as_str()) {
-                    let rank = shape.len();
-                    starts.get_or_insert(vec![0; rank]);
-                    ends.get_or_insert(shape.clone());
-                    crate::debug_println!(
-                        "[slice] falling back to data shape {:?} for {}",
-                        shape,
-                        node_name
-                    );
-                } else {
-                    // As a last resort, try to pull starts/ends from sibling consts
-                    // produced by earlier shape inference passes.
-                    if let Some(s) = context.const_values.get(starts_name) {
-                        starts = Some(s.clone());
-                    }
-                    if let Some(e) = context.const_values.get(ends_name) {
-                        ends = Some(e.clone());
-                    }
-                    if starts.is_none() || ends.is_none() {
-                        starts.get_or_insert(vec![0]);
-                        ends.get_or_insert(vec![1]);
-                        crate::debug_println!(
-                            "[slice] using default starts/ends for {}, starts={:?} ends={:?}",
-                            node_name,
-                            starts,
-                            ends
-                        );
-                    }
+                // As a last resort, try to pull starts/ends from sibling consts
+                // produced by earlier shape inference passes.
+                if let Some(s) = context.const_values.get(starts_name) {
+                    starts = Some(s.clone());
                 }
+                if let Some(e) = context.const_values.get(ends_name) {
+                    ends = Some(e.clone());
+                }
+
+                let fallback_len = if let Some(axes_name) = inputs.get(3).map(|s| s.as_str()) {
+                    read_ints(axes_name, context)
+                        .map(|v| v.len())
+                        .unwrap_or_else(|| {
+                            starts
+                                .as_ref()
+                                .map(|v| v.len())
+                                .or_else(|| {
+                                    context
+                                        .value_shapes
+                                        .get(inputs[0].as_str())
+                                        .map(|s| s.len())
+                                })
+                                .unwrap_or(1)
+                        })
+                } else {
+                    starts
+                        .as_ref()
+                        .map(|v| v.len())
+                        .or_else(|| {
+                            context
+                                .value_shapes
+                                .get(inputs[0].as_str())
+                                .map(|s| s.len())
+                        })
+                        .unwrap_or(1)
+                };
+
+                starts.get_or_insert(vec![0; fallback_len]);
+                // Keep Slice dynamic when ONNX ends input is non-const.
+                ends.get_or_insert(vec![i64::MAX; fallback_len]);
+
+                crate::debug_println!(
+                    "[slice] using fallback starts/ends for {}, starts={:?} ends={:?}",
+                    node_name,
+                    starts,
+                    ends
+                );
             }
 
             let starts = starts.ok_or_else(|| {
@@ -718,6 +737,7 @@ mod tests {
         let context = ConversionContext {
             initializers: &initializers,
             value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
             const_values: &const_values,
             value_ids: &value_ids,
             value_types: &value_types,
@@ -742,6 +762,7 @@ mod tests {
         let context = ConversionContext {
             initializers: &initializers,
             value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
             const_values: &const_values,
             value_ids: &value_ids,
             value_types: &value_types,
@@ -768,6 +789,7 @@ mod tests {
         let context = ConversionContext {
             initializers: &initializers,
             value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
             const_values: &const_values,
             value_ids: &value_ids,
             value_types: &value_types,
@@ -793,6 +815,7 @@ mod tests {
         let context = ConversionContext {
             initializers: &initializers,
             value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
             const_values: &const_values,
             value_ids: &value_ids,
             value_types: &value_types,
@@ -823,6 +846,7 @@ mod tests {
         let context = ConversionContext {
             initializers: &initializers,
             value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
             const_values: &const_values,
             value_ids: &value_ids,
             value_types: &value_types,
