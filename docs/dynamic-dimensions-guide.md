@@ -1,6 +1,6 @@
 # Dynamic Dimensions Guide
 
-A practical guide for determining dimension override values when converting ONNX models to WebNN format.
+A practical guide for choosing dimension override values when converting ONNX models to WebNN format.
 
 ## Table of Contents
 
@@ -15,25 +15,27 @@ A practical guide for determining dimension override values when converting ONNX
 ### What Are Dynamic Dimensions?
 
 ONNX models often use symbolic dimensions (like `batch_size`, `sequence_length`) instead of fixed
-numbers. This allows the same model to handle different input sizes. However, WebNN requires all
-shapes to be known at compile time.
+numbers. This allows the same model to handle different input sizes.
 
 Example ONNX input shape:
 ```
 input_ids: [batch_size, sequence_length]  # Dynamic
 ```
 
-Must become:
+In many models, shape-driving expressions must become static for conversion:
 ```
 input_ids: [1, 128]  # Static
 ```
 
-### Why Convert to Static Shapes?
+### Why Provide Overrides?
 
 WebNN executes in browsers and edge devices where:
 - Memory must be allocated upfront
-- Graph compilation requires known shapes
+- Shape-driving expressions (for example, reshape targets) must be resolvable
 - Performance is optimized for specific sizes
+
+`webnn-graph` can preserve unresolved symbolic **input metadata** in v2 graphs, but conversion still
+needs concrete values when dynamic shape math cannot be folded.
 
 ## Inspection Methods
 
@@ -181,17 +183,17 @@ sequence_length = (sample_rate * duration) // hop_length
 
 ### Step-by-Step Guide
 
-#### Step 1: Identify Dynamic Dimensions
+#### Step 1: Identify Dynamic Dimensions That Need Values
 
-Try converting without overrides to see what's needed:
+Try converting without overrides first:
 
 ```bash
 ./webnn-graph convert-onnx --input model.onnx
 ```
 
-Error output will tell you:
+If conversion cannot resolve required dims, error output will indicate what to set:
 ```
-Error: Dynamic dimensions require explicit overrides:
+Error: unresolved dynamic dimension(s) require explicit overrides:
  - input 'input_ids' dim 'batch_size': --override-dim batch_size=<value>
  - input 'input_ids' dim 'sequence_length': --override-dim sequence_length=<value>
 ```
@@ -307,11 +309,11 @@ for inp in model.graph.input:
 
 ### Problem: "Dynamic dimensions require explicit overrides"
 
-**Solution:** The model has symbolic dimensions that need concrete values.
+**Solution:** Some model paths still need concrete values for symbolic dimensions.
 
 ```bash
 # Error shows which dimensions need values
-Error: Dynamic dimensions require explicit overrides:
+Error: unresolved dynamic dimension(s) require explicit overrides:
  - input 'input' dim 'height': --override-dim height=<value>
 
 # Provide the missing dimensions
@@ -501,7 +503,7 @@ const result = await context.compute(graph, {
 ## Summary
 
 **The decision process:**
-1. Identify dynamic dimensions (try converting without overrides)
+1. Try converting without overrides and capture unresolved dimensions from the error
 2. Determine model type (text/vision/audio)
 3. Look up standard values for that model type
 4. Start with conservative (small) values

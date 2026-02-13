@@ -165,7 +165,7 @@ All CLI commands auto-detect and accept both formats.
 
 ## Features
 
-- **Convert ONNX models** to WebNN format (with static shape preprocessing)
+- **Convert ONNX models** to WebNN format with static lowering and dynamic input metadata
 - Parse WebNN graph text (`.webnn`) into a simple AST
 - Serialize the AST to canonical JSON
 - Serialize JSON back to `.webnn` with full round-trip support
@@ -215,21 +215,25 @@ Supported dtypes: `f32`, `f16`, `i4`, `u4`, `i32`, `u32`, `i64`, `u64`, `i8`, `u
 
 ## ONNX to WebNN Conversion
 
-The CLI includes a powerful ONNX-to-WebNN converter that enables you to take existing ONNX models and convert them to the WebNN format.
+The CLI includes a powerful ONNX-to-WebNN converter that enables you to take existing ONNX
+models and convert them to the WebNN format.
 
-### Prerequisites: Static Shapes Required
+### Prerequisites: Static Lowering for Shape Expressions
 
-**Important:** WebNN does not support dynamic shapes at runtime. The converter includes **built-in constant folding** (enabled with `--optimize`) to handle dynamic shape patterns automatically.
+**Important:** ONNX models may contain symbolic input dimensions. `webnn-graph` can preserve unresolved
+symbolic input dimensions in graph metadata (v2), but operations such as `reshape` still require static
+shape expressions for WebNN lowering. Use `--optimize` and `--override-dim` as needed.
 
 #### Why is this necessary?
 
-WebNN's `reshape` operation requires the shape parameter to be a constant, not a dynamically computed value. Many ONNX models (especially transformers/BERT) use dynamic shape patterns like:
+WebNN's `reshape` operation requires the shape parameter to be a constant, not a dynamically
+computed value. Many ONNX models (especially transformers/BERT) use dynamic shape patterns like:
 
 ```
 Shape → Gather → Concat → Reshape
 ```
 
-These patterns must be resolved to static constants at conversion time.
+These patterns are typically resolved to static constants during conversion.
 
 #### Built-in Constant Folding
 
