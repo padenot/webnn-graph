@@ -222,7 +222,8 @@ models and convert them to the WebNN format.
 
 **Important:** ONNX models may contain symbolic input dimensions. `webnn-graph` can preserve unresolved
 symbolic input dimensions in graph metadata (v2), but operations such as `reshape` still require static
-shape expressions for WebNN lowering. Use `--optimize` and `--override-dim` as needed.
+shape expressions for WebNN lowering. Dynamic input preservation is experimental and must be enabled with
+`--experimental-dynamic-inputs`. Use `--optimize` and `--override-dim` as needed.
 
 #### Why is this necessary?
 
@@ -290,6 +291,33 @@ webnn-graph convert-onnx --input model.onnx --optimize --output model.json \
   --override-dim batch_size=1 \
   --override-dim sequence_length=128
 ```
+
+### Example: Converting SmolLM-135M
+
+Download the ONNX model:
+
+```bash
+curl -L "https://huggingface.co/HuggingFaceTB/SmolLM-135M/resolve/main/onnx/model.onnx?download=true" \
+  -o /tmp/smol_hf.onnx
+```
+
+Then convert:
+
+```bash
+webnn-graph convert-onnx \
+  --input /tmp/smol_hf.onnx \
+  --optimize \
+  --experimental-dynamic-inputs \
+  --output /tmp/smol_hf.webnn \
+  --weights /tmp/smol_hf.weights \
+  --manifest /tmp/smol_hf.manifest.json
+```
+
+Observed output from that run:
+- Graph header: `webnn_graph "main_graph" v2`
+- `/tmp/smol_hf.webnn`: ~694 KB
+- `/tmp/smol_hf.weights`: ~513 MB
+- `/tmp/smol_hf.manifest.json`: ~423 KB
 
 ### Supported ONNX Operations
 

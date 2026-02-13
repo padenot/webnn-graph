@@ -33,7 +33,7 @@ This reference explains how `webnn-graph` lowers ONNX graphs into the WebNN DSL.
      - `Shape` → `Gather` → `Concat` → `Reshape`
      - Constant axes/starts/ends passed around as tensors
    - **Result**: shape expressions required by WebNN become static; unresolved symbolic input dims can be
-     preserved as metadata in v2 graphs.
+  preserved as metadata in v2 graphs when `--experimental-dynamic-inputs` is enabled.
 
 2) **Lower the ONNX graph to WebNN DSL**
    - **Opset guard**: only `ai.onnx` opset 11–18 is accepted.
@@ -68,8 +68,9 @@ flowchart LR
 
 
 ## How dynamic constructs are handled
-- **Symbolic input dims**: may be preserved in v2 input metadata when unresolved, but conversion still
-  requires concrete values wherever shape math must be static.
+- **Symbolic input dims**: may be preserved in v2 input metadata when unresolved if
+  `--experimental-dynamic-inputs` is enabled, but conversion still requires concrete values wherever
+  shape math must be static.
 - **Shape-producing ops** (`Shape`, `Gather`, `Concat`, `Unsqueeze`, `Squeeze`, `Cast` of ints):
   - If the inputs are compile-time constants, the converter folds them and records both the values and
     shapes.

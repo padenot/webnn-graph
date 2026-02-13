@@ -542,6 +542,8 @@ pub struct ConvertOptions {
     pub free_dim_overrides: HashMap<String, u32>,
     /// Enable constant folding and shape propagation optimizations
     pub optimize: bool,
+    /// Experimental: preserve unresolved dynamic input dimensions in v2 graph metadata
+    pub experimental_dynamic_inputs: bool,
 }
 
 impl Default for ConvertOptions {
@@ -553,6 +555,7 @@ impl Default for ConvertOptions {
             manifest_path: Some("output.manifest.json".to_string()),
             free_dim_overrides: HashMap::new(),
             optimize: false,
+            experimental_dynamic_inputs: false,
         }
     }
 }
@@ -584,7 +587,7 @@ impl OnnxConverter {
 
         let graph = GraphJson {
             format: "webnn-graph-json".to_string(),
-            version: 2,
+            version: 1,
             name: Some(graph_name),
             quantized: false,
             inputs: BTreeMap::new(),
@@ -757,11 +760,21 @@ impl OnnxConverter {
                                     DimensionValue::DimValue(v) => {
                                         if *v > 0 {
                                             resolved.push(Dimension::Static(*v as u32));
-                                        } else {
+                                        } else if options.experimental_dynamic_inputs {
                                             resolved.push(Dimension::Dynamic(DynamicDimension {
                                                 name: format!("{}_dim{}", name, idx),
                                                 max_size: default_dynamic_max_size,
                                             }));
+                                        } else {
+                                            let dim_hint = format!("{}_dim{}", name, idx);
+                                            return Err(OnnxError::InvalidShape(format!(
+                                                "Input '{}' has non-positive dim value ({}) at index {}. \
+Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
+                                                raw_name,
+                                                v,
+                                                idx,
+                                                dim_hint
+                                            )));
                                         }
                                     }
                                     DimensionValue::DimParam(dim_param) => {
@@ -770,20 +783,41 @@ impl OnnxConverter {
                                             &mut effective_overrides,
                                         ) {
                                             resolved.push(Dimension::Static(v));
-                                        } else {
+                                        } else if options.experimental_dynamic_inputs {
                                             let max_size = dynamic_max_for_dim(dim_param);
                                             resolved.push(Dimension::Dynamic(DynamicDimension {
                                                 name: dim_param.to_string(),
                                                 max_size,
                                             }));
+                                        } else if let Some(v) = resolve_dim_for_inference(
+                                            dim_param,
+                                            &mut inference_overrides,
+                                        ) {
+                                            effective_overrides
+                                                .entry(dim_param.clone())
+                                                .or_insert(v);
+                                            resolved.push(Dimension::Static(v));
+                                        } else {
+                                            return Err(OnnxError::InvalidShape(format!(
+                                                "Input '{}' has unresolved dynamic dimension '{}'. \
+Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
+                                                raw_name, dim_param, dim_param
+                                            )));
                                         }
                                     }
                                 }
-                            } else {
+                            } else if options.experimental_dynamic_inputs {
                                 resolved.push(Dimension::Dynamic(DynamicDimension {
                                     name: format!("{}_dim{}", name, idx),
                                     max_size: default_dynamic_max_size,
                                 }));
+                            } else {
+                                let dim_hint = format!("{}_dim{}", name, idx);
+                                return Err(OnnxError::InvalidShape(format!(
+                                    "Input '{}' has unknown dimension at index {}. \
+Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
+                                    raw_name, idx, dim_hint
+                                )));
                             }
                         }
                         resolved
@@ -1813,6 +1847,14 @@ impl OnnxConverter {
             }
         }
 
+        let has_dynamic_inputs = self.graph.inputs.values().any(|operand| {
+            operand
+                .shape
+                .iter()
+                .any(|dim| matches!(dim, Dimension::Dynamic(_)))
+        });
+        self.graph.version = if has_dynamic_inputs { 2 } else { 1 };
+
         Ok(self.graph)
     }
 }
@@ -2155,7 +2197,10 @@ mod tests {
 
         let converter = OnnxConverter::new(model).expect("converter");
         let graph = converter
-            .convert(&ConvertOptions::default())
+            .convert(&ConvertOptions {
+                experimental_dynamic_inputs: true,
+                ..ConvertOptions::default()
+            })
             .expect("convert");
 
         let input = graph.inputs.get("input_ids").expect("input_ids input");
@@ -2165,5 +2210,63 @@ mod tests {
             Dimension::Dynamic(d) if d.name == "batch_size"
         ));
         assert!(matches!(&input.shape[1], Dimension::Static(1)));
+        assert_eq!(graph.version, 2);
+    }
+
+    #[test]
+    fn test_convert_rejects_dynamic_input_dim_without_flag() {
+        use crate::protos::onnx::{tensor_shape_proto, type_proto};
+        use crate::protos::onnx::{GraphProto, ModelProto, TensorShapeProto, ValueInfoProto};
+
+        let dim_batch = tensor_shape_proto::Dimension {
+            value: Some(tensor_shape_proto::dimension::Value::DimParam(
+                "unknown_dim".to_string(),
+            )),
+            denotation: String::new(),
+        };
+        let dim_seq = tensor_shape_proto::Dimension {
+            value: Some(tensor_shape_proto::dimension::Value::DimValue(1)),
+            denotation: String::new(),
+        };
+        let shape = TensorShapeProto {
+            dim: vec![dim_batch, dim_seq],
+        };
+
+        let tensor_type = type_proto::Tensor {
+            elem_type: TensorProto_DataType::Int64.into(),
+            shape: Some(shape),
+        };
+        let type_proto = crate::protos::onnx::TypeProto {
+            value: Some(type_proto::Value::TensorType(tensor_type)),
+            denotation: String::new(),
+        };
+
+        let input_vi = ValueInfoProto {
+            name: "input_ids".to_string(),
+            r#type: Some(type_proto.clone()),
+            ..Default::default()
+        };
+        let output_vi = ValueInfoProto {
+            name: "input_ids".to_string(),
+            r#type: Some(type_proto),
+            ..Default::default()
+        };
+
+        let model = ModelProto {
+            graph: Some(GraphProto {
+                input: vec![input_vi],
+                output: vec![output_vi],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let converter = OnnxConverter::new(model).expect("converter");
+        let err = converter
+            .convert(&ConvertOptions::default())
+            .expect_err("should require overrides or flag");
+        let msg = err.to_string();
+        assert!(msg.contains("override-dim"));
+        assert!(msg.contains("experimental-dynamic-inputs"));
     }
 }

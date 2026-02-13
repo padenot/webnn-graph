@@ -34,8 +34,9 @@ WebNN executes in browsers and edge devices where:
 - Shape-driving expressions (for example, reshape targets) must be resolvable
 - Performance is optimized for specific sizes
 
-`webnn-graph` can preserve unresolved symbolic **input metadata** in v2 graphs, but conversion still
-needs concrete values when dynamic shape math cannot be folded.
+`webnn-graph` can preserve unresolved symbolic **input metadata** in v2 graphs with
+`--experimental-dynamic-inputs`, but conversion still needs concrete values when dynamic shape math
+cannot be folded.
 
 ## Inspection Methods
 

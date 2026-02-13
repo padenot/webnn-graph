@@ -127,6 +127,10 @@ enum Command {
         /// Enable constant folding and shape propagation optimizations
         #[arg(long)]
         optimize: bool,
+
+        /// Experimental: preserve unresolved dynamic input dimensions in v2 graph metadata
+        #[arg(long)]
+        experimental_dynamic_inputs: bool,
     },
 }
 
@@ -261,6 +265,7 @@ fn main() -> anyhow::Result<()> {
             override_dims,
             override_dims_file,
             optimize,
+            experimental_dynamic_inputs,
         } => {
             // Parse dimension overrides
             let mut free_dim_overrides = if let Some(path) = override_dims_file {
@@ -334,6 +339,7 @@ fn main() -> anyhow::Result<()> {
                 free_dim_overrides,
                 optimize,
                 manifest_path: manifest_path.clone(),
+                experimental_dynamic_inputs,
             };
 
             let graph = convert_onnx(&input, options)?;
