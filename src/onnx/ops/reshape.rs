@@ -697,6 +697,14 @@ impl ReshapeHandler {
         };
 
         let mut options = Map::new();
+        // When newShape is empty and no dynamic shape is available, include the
+        // original ONNX shape input as a second operand so downstream converters
+        // can use it as a dynamic shape tensor.
+        let shape_input_ref = if dynamic_shape_json.is_none() && shape_values.is_empty() {
+            Some(context.resolve_input(&shape_input_raw))
+        } else {
+            None
+        };
         if let Some(json_dims) = dynamic_shape_json {
             options.insert("newShape".to_string(), serde_json::json!(json_dims));
         } else {
@@ -706,10 +714,16 @@ impl ReshapeHandler {
             );
         }
 
+        let inputs = if let Some(ref shape_ref) = shape_input_ref {
+            vec![data_input, shape_ref.clone()]
+        } else {
+            vec![data_input]
+        };
+
         let mut result = ConversionResult::new(vec![Node {
             id: output_name.clone(),
             op: op_type.to_string(),
-            inputs: vec![data_input],
+            inputs,
             options,
             outputs: None,
         }]);
