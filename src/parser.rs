@@ -296,7 +296,8 @@ fn parse_call(p: Pair<Rule>) -> Result<ParsedExpr, ParseError> {
                         );
                     }
                     // Handle bracketed input lists like `concat([a, b], ...)`: `parse_value`
-                    // returns `Value::Array` for `[a, b]`, which we flatten into individual inputs.                    let v = parse_value(first)?;
+                    // returns `Value::Array` for `[a, b]`, which we flatten into individual inputs.
+                    let v = parse_value(first)?;
                     match v {
                         Value::String(s) => inputs.push(s),
                         Value::Array(arr) => {
