@@ -1,5 +1,8 @@
 pub mod ast;
 pub mod debug;
+pub mod external_weights;
+pub use external_weights::{resolve_external_weights, WeightResolveError};
+
 pub mod emit_html;
 pub mod emit_js;
 pub mod onnx;
