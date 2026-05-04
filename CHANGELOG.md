@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
-## [0.3.0] - to be released
+## [0.3.0] - 2026-05-04
 
 ### Added
 - Dynamic dimension representation in AST and WG grammar via `dyn("name", maxSize)` input dims.
