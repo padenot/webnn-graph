@@ -1327,6 +1327,7 @@ impl OnnxConverter {
             consts: BTreeMap::new(),
             nodes: Vec::new(),
             outputs: BTreeMap::new(),
+            intermediate_shapes: BTreeMap::new(),
         };
 
         Ok(Self {

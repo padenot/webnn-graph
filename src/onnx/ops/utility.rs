@@ -15,7 +15,7 @@ impl OpHandler for UtilityHandler {
     fn supports(&self, op_type: &str) -> bool {
         matches!(
             op_type,
-            "Shape" | "Gather" | "Slice" | "ConstantOfShape" | "Range" | "Trilu"
+            "Shape" | "Gather" | "Slice" | "ConstantOfShape" | "Range" | "Trilu" | "Pad"
         )
     }
 
@@ -38,6 +38,7 @@ impl OpHandler for UtilityHandler {
             "ConstantOfShape" => self.convert_constant_of_shape(node, &node_name, context),
             "Range" => self.convert_range(node, &node_name, context),
             "Trilu" => self.convert_trilu(node, &node_name, context),
+            "Pad" => self.convert_pad(node, &node_name, context),
             _ => Err(OnnxError::UnsupportedOp {
                 op: op_type.to_string(),
                 node: node_name,
@@ -1054,6 +1055,120 @@ impl UtilityHandler {
                 result
                     .output_types
                     .insert(output.to_string(), dtype.clone());
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Convert ONNX Pad to WebNN pad.
+    /// ONNX pads tensor: [begin_0, begin_1, ..., end_0, end_1, ...] (int64)
+    fn convert_pad(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if inputs.is_empty() {
+            return Err(OnnxError::InvalidShape(
+                "Pad expects at least 1 input (data)".to_string(),
+            ));
+        }
+
+        let output_name = if node.output.as_slice().is_empty() {
+            format!("{}_output", node_name)
+        } else {
+            sanitize_identifier(&node.output.as_slice()[0].to_string())
+        };
+
+        let input0 = context.resolve_input(&inputs[0]);
+
+        // Read pads from second input or attribute (opset 11+ uses input)
+        let pads_values: Vec<i64> = if inputs.len() > 1 {
+            let pads_name = &inputs[1];
+            if let Some(vals) = context.const_values.get(pads_name.as_str()) {
+                vals.clone()
+            } else if let Some(t) = context.initializers.get(pads_name.as_str()) {
+                let raw = t.raw_data.as_slice();
+                if !raw.is_empty() {
+                    raw.chunks_exact(8)
+                        .map(|b| i64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                        .collect()
+                } else {
+                    t.int64_data.iter().map(|&v| v).collect()
+                }
+            } else {
+                return Err(OnnxError::InvalidShape(format!(
+                    "Pad {}: pads input must be a constant (not dynamic)",
+                    node_name
+                )));
+            }
+        } else {
+            // Fallback: try 'pads' attribute (older opset)
+            node.attribute
+                .iter()
+                .find(|a| a.name == "pads")
+                .map(|a| a.ints.iter().map(|&v| v).collect())
+                .unwrap_or_default()
+        };
+
+        let rank = pads_values.len() / 2;
+        let beginning: Vec<i64> = pads_values[..rank].to_vec();
+        let ending: Vec<i64> = pads_values[rank..].to_vec();
+
+        let mode = node
+            .attribute
+            .iter()
+            .find(|a| a.name == "mode")
+            .map(|a| a.s.as_slice())
+            .and_then(|s| std::str::from_utf8(s).ok())
+            .unwrap_or("constant")
+            .to_string();
+
+        let webnn_mode = match mode.as_str() {
+            "reflect" => "reflection",
+            "edge" => "edge",
+            _ => "constant",
+        };
+
+        let constant_value = if inputs.len() > 2 {
+            let cv_name = &inputs[2];
+            if !cv_name.is_empty() {
+                if let Some(vals) = context.const_values.get(cv_name.as_str()) {
+                    vals.first().map(|&v| v as f64)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut options = Map::new();
+        options.insert("beginningPadding".to_string(), json!(beginning));
+        options.insert("endingPadding".to_string(), json!(ending));
+        options.insert("mode".to_string(), json!(webnn_mode));
+        if let Some(cv) = constant_value {
+            options.insert("value".to_string(), json!(cv));
+        }
+
+        let mut result = ConversionResult::new(vec![Node {
+            id: output_name.clone(),
+            op: "pad".to_string(),
+            inputs: vec![input0],
+            options,
+            outputs: None,
+        }]);
+
+        if let Some(output) = node.output.as_slice().first() {
+            result
+                .output_mappings
+                .insert(output.to_string(), output_name.clone());
+            if let Some(dtype) = context.value_types.get(inputs[0].as_str()) {
+                result.output_types.insert(output.to_string(), dtype.clone());
             }
         }
 

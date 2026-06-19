@@ -12,7 +12,7 @@ impl OpHandler for ElementwiseHandler {
     fn supports(&self, op_type: &str) -> bool {
         matches!(
             op_type,
-            "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Min" | "Max"
+            "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Min" | "Max" | "And" | "Or" | "Xor"
         )
     }
 
@@ -56,6 +56,9 @@ impl OpHandler for ElementwiseHandler {
             "Pow" => "pow",
             "Min" => "min",
             "Max" => "max",
+            "And" => "logicalAnd",
+            "Or" => "logicalOr",
+            "Xor" => "logicalXor",
             _ => {
                 return Err(OnnxError::UnsupportedOp {
                     op: op_type.to_string(),

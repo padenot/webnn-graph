@@ -40,6 +40,10 @@ pub struct GraphJson {
     pub nodes: Vec<Node>,
     // output_name -> value reference name
     pub outputs: BTreeMap<String, String>,
+    // Shapes of intermediate (non-input, non-const) operands for lossless round-trip.
+    // Populated by AOT tools; allows loading without shape re-inference.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub intermediate_shapes: BTreeMap<String, OperandDesc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +147,7 @@ pub fn new_graph_json() -> GraphJson {
         consts: BTreeMap::new(),
         nodes: Vec::new(),
         outputs: BTreeMap::new(),
+        intermediate_shapes: BTreeMap::new(),
     }
 }
 

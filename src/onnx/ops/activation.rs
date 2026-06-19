@@ -1,4 +1,4 @@
-// Activation and unary math operators: Relu, Gelu, Tanh, Sigmoid, Sqrt, Exp, Log, Abs, Neg, Erf
+// Activation and unary math operators: Relu, Gelu, Tanh, Sigmoid, Sqrt, Exp, Log, Abs, Neg, Erf, Floor, Ceil, Not
 
 use crate::ast::Node;
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
@@ -25,6 +25,9 @@ impl OpHandler for ActivationHandler {
                 | "Cos"
                 | "Sin"
                 | "Identity"
+                | "Floor"
+                | "Ceil"
+                | "Not"
         )
     }
 
@@ -55,6 +58,9 @@ impl OpHandler for ActivationHandler {
             "Cos" => "cos",
             "Sin" => "sin",
             "Identity" => "identity",
+            "Floor" => "floor",
+            "Ceil" => "ceil",
+            "Not" => "logicalNot",
             _ => {
                 return Err(OnnxError::UnsupportedOp {
                     op: op_type.to_string(),
