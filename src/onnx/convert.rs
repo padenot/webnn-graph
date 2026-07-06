@@ -3015,6 +3015,7 @@ fn extract_weights_from_onnx(
             TensorEntry {
                 data_type,
                 shape,
+                file: None,
                 byte_offset: current_offset,
                 byte_length,
                 layout: None,
@@ -3038,6 +3039,7 @@ fn extract_weights_from_onnx(
                     TensorEntry {
                         data_type: decl.data_type.clone(),
                         shape: decl.shape.clone(),
+                        file: None,
                         byte_offset: current_offset,
                         byte_length,
                         layout: None,

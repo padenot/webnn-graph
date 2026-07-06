@@ -256,6 +256,8 @@ struct FlexibleManifest {
 
 #[derive(Debug, Deserialize, Clone)]
 struct FlexibleTensorEntry {
+    #[serde(default)]
+    file: Option<String>,
     #[serde(rename = "byteOffset")]
     byte_offset: u64,
     #[serde(rename = "byteLength")]
@@ -272,11 +274,6 @@ fn inline_weights_from_manifest(
             path: manifest_path.to_path_buf(),
             source,
         })?;
-    let weights_bytes = fs::read(weights_path).map_err(|source| WeightResolveError::ReadFile {
-        path: weights_path.to_path_buf(),
-        source,
-    })?;
-
     let manifest: FlexibleManifest = serde_json::from_str(&manifest_text).map_err(|source| {
         WeightResolveError::ManifestJson {
             path: manifest_path.to_path_buf(),
@@ -292,6 +289,8 @@ fn inline_weights_from_manifest(
             .or_default()
             .push(entry.clone());
     }
+
+    let mut weights_cache: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 
     for (const_name, const_decl) in graph_json.consts.iter_mut() {
         let ConstInit::Weights { r#ref } = &const_decl.init else {
@@ -331,11 +330,31 @@ fn inline_weights_from_manifest(
         let end = start.checked_add(len).ok_or_else(|| {
             WeightResolveError::Manifest(format!("byte range overflow for `{ref}`"))
         })?;
+
+        let entry_weights_path = entry
+            .file
+            .as_deref()
+            .map(|path| resolve_path_relative_to_graph(manifest_path, path))
+            .unwrap_or_else(|| weights_path.to_path_buf());
+        let weights_bytes = if let Some(bytes) = weights_cache.get(&entry_weights_path) {
+            bytes
+        } else {
+            let bytes =
+                fs::read(&entry_weights_path).map_err(|source| WeightResolveError::ReadFile {
+                    path: entry_weights_path.clone(),
+                    source,
+                })?;
+            weights_cache.insert(entry_weights_path.clone(), bytes);
+            weights_cache
+                .get(&entry_weights_path)
+                .expect("just inserted")
+        };
+
         if end > weights_bytes.len() {
             return Err(WeightResolveError::Manifest(format!(
                 "byte range [{start}, {end}) for `{ref}` exceeds weights file length {} (`{}`)",
                 weights_bytes.len(),
-                weights_path.display()
+                entry_weights_path.display()
             )));
         }
         const_decl.init = ConstInit::InlineBytes {
@@ -609,6 +628,58 @@ mod tests {
         .unwrap();
         match &graph.consts["weight"].init {
             ConstInit::InlineBytes { bytes } => assert_eq!(bytes.len(), 8),
+            other => panic!("expected inline bytes, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn manifest_entry_file_overrides_default_weights_blob() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join(DEFAULT_PATH_JSON);
+        let manifest_path = temp_dir.path().join("model.manifest.json");
+        let local_weights_path = temp_dir.path().join(DEFAULT_PATH_WEIGHTS);
+        let shared_weights_path = temp_dir.path().join("shared.weights");
+
+        let graph_content = r#"{
+            "format": "webnn-graph-json",
+            "version": 1,
+            "inputs": { "x": { "dataType": "float32", "shape": [2] } },
+            "consts": {
+                "weight": {
+                    "dataType": "float32",
+                    "shape": [2],
+                    "init": { "kind": "weights", "ref": "weight" }
+                }
+            },
+            "nodes": [],
+            "outputs": { "y": "x" }
+        }"#;
+
+        let manifest_content = r#"{
+            "format": "webnn-weights-manifest",
+            "version": 1,
+            "endianness": "little",
+            "tensors": {
+                "weight": {
+                    "dataType": "float32",
+                    "shape": [2],
+                    "file": "shared.weights",
+                    "byteOffset": 0,
+                    "byteLength": 8
+                }
+            }
+        }"#;
+
+        let shared_data: Vec<u8> = vec![0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x40];
+        std::fs::write(&graph_path, graph_content).unwrap();
+        std::fs::write(&manifest_path, manifest_content).unwrap();
+        std::fs::write(&local_weights_path, vec![0u8; 8]).unwrap();
+        std::fs::write(&shared_weights_path, &shared_data).unwrap();
+
+        let mut graph: GraphJson = serde_json::from_str(graph_content).unwrap();
+        resolve_external_weights(&mut graph, &graph_path, None, None).unwrap();
+        match &graph.consts["weight"].init {
+            ConstInit::InlineBytes { bytes } => assert_eq!(bytes, &shared_data),
             other => panic!("expected inline bytes, got {:?}", other),
         }
     }

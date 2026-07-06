@@ -13,7 +13,8 @@ use webnn_graph::serialize::serialize_graph_to_wg_text;
 use webnn_graph::validate::{validate_graph, validate_weights};
 use webnn_graph::weights::WeightsManifest;
 use webnn_graph::weights_io::{
-    create_manifest, extract_weights, inline_weights, pack_weights, unpack_weights,
+    create_manifest, extract_weights, extract_weights_with_reuse, inline_weights, pack_weights,
+    unpack_weights, ReusableWeightsSource,
 };
 
 #[derive(Parser)]
@@ -85,6 +86,10 @@ enum Command {
         manifest: String,
         #[arg(long)]
         output_graph: String,
+        #[arg(long = "reuse-weights")]
+        reuse_weights: Option<String>,
+        #[arg(long = "reuse-manifest")]
+        reuse_manifest: Option<String>,
     },
     InlineWeights {
         #[arg(long)]
@@ -240,9 +245,27 @@ fn main() -> anyhow::Result<()> {
             weights,
             manifest,
             output_graph,
+            reuse_weights,
+            reuse_manifest,
         } => {
             let g = load_graph(&input)?;
-            let new_graph = extract_weights(&g, &output_dir, &weights, &manifest)?;
+            let new_graph = match (reuse_weights, reuse_manifest) {
+                (Some(weights_file), Some(manifest_file)) => extract_weights_with_reuse(
+                    &g,
+                    &weights,
+                    &manifest,
+                    &[ReusableWeightsSource {
+                        weights_file,
+                        manifest_file,
+                    }],
+                )?,
+                (None, None) => extract_weights(&g, &output_dir, &weights, &manifest)?,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "--reuse-weights and --reuse-manifest must be passed together"
+                    ));
+                }
+            };
             let json = serde_json::to_string_pretty(&new_graph)?;
             fs::write(&output_graph, json)?;
             eprintln!("Wrote graph with weight references to: {}", output_graph);

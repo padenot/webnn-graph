@@ -1096,7 +1096,7 @@ impl UtilityHandler {
                         .map(|b| i64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
                         .collect()
                 } else {
-                    t.int64_data.iter().map(|&v| v).collect()
+                    t.int64_data.to_vec()
                 }
             } else {
                 return Err(OnnxError::InvalidShape(format!(
@@ -1109,7 +1109,7 @@ impl UtilityHandler {
             node.attribute
                 .iter()
                 .find(|a| a.name == "pads")
-                .map(|a| a.ints.iter().map(|&v| v).collect())
+                .map(|a| a.ints.to_vec())
                 .unwrap_or_default()
         };
 
@@ -1168,7 +1168,9 @@ impl UtilityHandler {
                 .output_mappings
                 .insert(output.to_string(), output_name.clone());
             if let Some(dtype) = context.value_types.get(inputs[0].as_str()) {
-                result.output_types.insert(output.to_string(), dtype.clone());
+                result
+                    .output_types
+                    .insert(output.to_string(), dtype.clone());
             }
         }
 

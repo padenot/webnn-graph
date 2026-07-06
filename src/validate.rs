@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use crate::ast::{ConstInit, GraphJson};
-use crate::weights::{dtype_size, numel, WeightsManifest};
+use crate::weights::{tensor_byte_length, WeightsManifest};
 
 #[derive(Debug, Error)]
 pub enum ValidateError {
@@ -94,7 +94,7 @@ pub fn validate_weights(g: &GraphJson, m: &WeightsManifest) -> Result<(), Valida
                 });
             }
 
-            let expected = dtype_size(&c.data_type) * numel(&c.shape);
+            let expected = tensor_byte_length(&c.data_type, &c.shape);
             if entry.byte_length != expected {
                 return Err(ValidateError::WeightByteLengthMismatch {
                     ref_: r#ref.clone(),
@@ -249,6 +249,7 @@ mod tests {
             TensorEntry {
                 data_type: DataType::Float32,
                 shape: vec![10, 5],
+                file: None,
                 byte_offset: 0,
                 byte_length: 200, // 10 * 5 * 4 bytes
                 layout: None,
@@ -310,6 +311,7 @@ mod tests {
             TensorEntry {
                 data_type: DataType::Float16, // Mismatched type
                 shape: vec![10, 5],
+                file: None,
                 byte_offset: 0,
                 byte_length: 100,
                 layout: None,
@@ -346,6 +348,7 @@ mod tests {
             TensorEntry {
                 data_type: DataType::Float32,
                 shape: vec![10, 5],
+                file: None,
                 byte_offset: 0,
                 byte_length: 100, // Wrong: should be 200
                 layout: None,

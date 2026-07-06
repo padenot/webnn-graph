@@ -16,6 +16,12 @@ pub struct TensorEntry {
     #[serde(rename = "dataType")]
     pub data_type: DataType,
     pub shape: Vec<u32>,
+    /// Optional weights blob for this tensor.
+    ///
+    /// When omitted, the tensor is resolved from the weights file selected for the graph.
+    /// When present, the path is resolved relative to the manifest containing this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(rename = "byteOffset")]
     pub byte_offset: u64,
     #[serde(rename = "byteLength")]
@@ -35,6 +41,14 @@ pub fn dtype_size(dt: &DataType) -> u64 {
         DataType::Uint64 => 8,
         DataType::Int8 => 1,
         DataType::Uint8 => 1,
+    }
+}
+
+pub fn tensor_byte_length(dt: &DataType, shape: &[u32]) -> u64 {
+    let elements = numel(shape);
+    match dt {
+        DataType::Int4 | DataType::Uint4 => elements.div_ceil(2),
+        _ => dtype_size(dt) * elements,
     }
 }
 
@@ -60,6 +74,15 @@ mod tests {
         assert_eq!(dtype_size(&DataType::Uint64), 8);
         assert_eq!(dtype_size(&DataType::Int8), 1);
         assert_eq!(dtype_size(&DataType::Uint8), 1);
+    }
+
+    #[test]
+    fn test_tensor_byte_length_sub_byte() {
+        assert_eq!(tensor_byte_length(&DataType::Int4, &[0]), 0);
+        assert_eq!(tensor_byte_length(&DataType::Int4, &[1]), 1);
+        assert_eq!(tensor_byte_length(&DataType::Int4, &[2]), 1);
+        assert_eq!(tensor_byte_length(&DataType::Int4, &[3]), 2);
+        assert_eq!(tensor_byte_length(&DataType::Uint4, &[10, 10]), 50);
     }
 
     #[test]
