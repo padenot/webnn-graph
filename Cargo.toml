@@ -1,10 +1,13 @@
 [package]
 name = "webnn-graph"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
 description = "Simple DSL for WebNN graphs"
+repository = "https://github.com/rustnn/webnn-graph"
+# The ResNet example weights are 8 MiB; crates.io caps a package at 10 MiB.
+exclude = ["/examples/resnet_head.weights"]
 
 [lib]
 name = "webnn_graph"
@@ -30,7 +33,7 @@ pest_derive = "2.7"
 clap = { version = "4.5", features = ["derive"] }
 base64 = "0.22"
 prost = { version = "0.12", optional = true }
-webnn-onnx-utils = { git = "https://github.com/rustnn/webnn-onnx-utils", branch = "main", optional = true }
+webnn-onnx-utils = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

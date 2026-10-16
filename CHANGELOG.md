@@ -4,7 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
-## [0.3.0] - to be released
+## [0.4.0] - 2026-10-15
+
+### Added
+- Packed Int4 and Uint4 external weights in versioned SafeTensors archives: `write_external_weights_safetensors`, `WeightWriteError`, and the `PACKED_4BIT_METADATA_KEY` / `PACKED_4BIT_METADATA_VERSION` markers; the shared resolver reads packed, mixed, manifest-backed and raw weights (#19).
+- Format documentation: `docs/webnn-format.md` (graph versions, shapes, initializers, node options, multi-output operations, `GraphJson`) and `docs/external-weights.md` (SafeTensors and manifest layouts, sidecar discovery, packed 4-bit storage, writer behaviour) (#19).
+- ONNX converter: `Conv`, pooling, `Reshape` and `Identity` for ResNet-50 (#16); `Softplus` with shape propagation (#21); opset 20, faithful tanh-approximation `Gelu` lowering, and rejection of unsupported GELU approximations (#23).
+
+### Changed
+- ONNX conversion is behind the `onnx` Cargo feature, enabled by default; `--no-default-features` builds the parser, serializer, validators and weight tooling without `protoc`. The `onnx` and `protos` modules are only present with the feature (#13).
+- `webnn-onnx-utils` is taken from crates.io (0.1.1) instead of a git branch, which is required to publish this crate.
+- `publish.yml` fails when the release tag does not match the `Cargo.toml` version.
+- The crate package no longer ships `examples/resnet_head.weights` (8 MiB); clone the repository for the ResNet example.
+
+### Fixed
+- README link (#14).
+
+### Compatibility
+- The default feature set is unchanged. Consumers that build with `default-features = false` must now enable `onnx` to keep the converter.
+
+## [0.3.0] - 2026-05-04
 
 ### Added
 - Dynamic dimension representation in AST and WG grammar via `dyn("name", maxSize)` input dims.

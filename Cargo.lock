@@ -227,7 +227,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -752,7 +752,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -923,7 +923,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "webnn-graph"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1112,7 +1112,8 @@ dependencies = [
 [[package]]
 name = "webnn-onnx-utils"
 version = "0.1.1"
-source = "git+https://github.com/rustnn/webnn-onnx-utils?branch=main#cead2ef3a35dded186617d0256614e2d5df463f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e27dc3ae7bb6b6db1002fe4c50f5fd105f248aa3e35e0c2cff1db6e7cd6b8b6"
 dependencies = [
  "half",
  "once_cell",

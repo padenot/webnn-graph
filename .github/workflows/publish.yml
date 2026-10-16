@@ -32,6 +32,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
+      - name: Check that the release tag matches the crate version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "Release tag $TAG does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+          echo "Release tag $TAG matches Cargo.toml version $VERSION"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -41,7 +53,7 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Publish rustnn to crates.io
+      - name: Publish webnn-graph to crates.io
         if: |
           github.event_name == 'release' ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')
